@@ -1,0 +1,28 @@
+{
+  "name": "zfsdom",
+  "version": "0.9.0",
+  "description": "",
+  "main": "index.js",
+  "bin": "index.js",
+  "scripts": {
+    "build": "mkdir -p build && pkg . --output build/zfsdom"
+  },
+  "pkg": {
+    "targets": [
+      "node18-linux-x64",
+      "node18-linux-arm64"
+    ]
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bytes": "^3.1.2",
+    "progress": "^2.0.3",
+    "shelljs": "^0.8.5",
+    "ssh2-promise": "^1.0.3",
+    "yargs": "^17.7.2"
+  },
+  "devDependencies": {
+    "pkg": "^5.8.1"
+  }
+}
