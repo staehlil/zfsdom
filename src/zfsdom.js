@@ -156,7 +156,20 @@ class Zfsdom {
       total: 100,
       width: 40
     });
-    const [destHost, destDataset] = destHostPath.split(':');
+
+    // destHost should include port specification (e.g. :2222) if applicable, so this should not be split off as destDataset
+    let destParts = destHostPath.split(":");
+    let destHost = destParts.shift();
+    let destDataset = null;
+    if (destParts.length) {
+      let part = destParts.shift();
+      if (isNaN(part))
+        destDataset = part;
+      else
+        destHost = `${destHost}:${part}`
+    }
+    if (destParts.length)
+      destDataset = destParts.shift();
 
     const ssh = this.openRemoteSSH(destHost);
     let remoteDataset = null;
@@ -193,7 +206,8 @@ class Zfsdom {
       const sendCmd = 'zfs';
       const sendOpts = ['send', '-v', cmdIncremental, localLatest];
       const recvCmd = 'ssh';
-      const recvOpts = [destHost, 'zfs', 'recv', destDataset || dataset, cmdForce];
+      const [destHostName, destPort] = destHost.split(":");
+      const recvOpts = [...destPort ? ['-p', destPort] : [], destHostName, 'zfs', 'recv', destDataset || dataset, cmdForce];
 
       this.printShellCmd(`${sendCmd} ${sendOpts.join(" ")} | ${recvCmd} ${recvOpts.join(" ")}`);
 
@@ -338,7 +352,19 @@ class Zfsdom {
    * @returns {Promise<boolean>}
    */
   async migrateDomain(domain, destHostPath, run, force) {
-    const [destHost, destPath] = destHostPath.split(':');
+    let destParts = destHostPath.split(":");
+    let destHost = destParts.shift();
+    let destPath = null;
+    if (destParts.length) {
+      let part = destParts.shift();
+      if (isNaN(part))
+        destPath = part;
+      else
+        destHost = `${destHost}:${part}`
+    }
+    if (destParts.length)
+      destPath = destParts.shift();
+
     let { stdout:isRunning } = await execAsync(`virsh list --name | grep -x "\\b${domain}\\b"`);
     isRunning = isRunning.trim();
 
