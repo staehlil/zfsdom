@@ -61,6 +61,32 @@ const argv = yargs(hideBin(process.argv))
               .example("migrate --domain foo host1:bar/baz", "live (suspended) migrate the libvirt domain named 'foo' with its storage residing on a local ZFS dataset to the remote host 'host1', transferring storage to the ZFS dataset 'bar/baz' (asymmetric transfer)")
         }
     )
+    .command(
+        'list-domains [host]',
+        'List libvirt domains running on target host',
+        (yargs) => {
+          return yargs
+              .positional('host', {
+                description: 'Target host and port (optional) specified as HOSTNAME[:PORT]',
+                type: 'string',
+                demandOption: true,
+              })
+              .option('all', {
+                description: 'List all domains, regardless of state (default: list only running domains)',
+                type: 'boolean',
+              })
+              .option('plain', {
+                description: 'Plain output (default: json)',
+                type: 'boolean',
+              })
+              .check((argv) => {
+                if (!argv.host) {
+                  throw new Error('host should be provided.');
+                }
+                return true;
+              })
+        }
+    )
     .option('do', {
       description: 'only actually do anything if set to true, dry-run otherwise',
       type: 'boolean',
@@ -90,6 +116,12 @@ if (action === 'migrate' && argv['dest']) {
   } else {
     console.log('Please provide either --dataset or --domain argument for transferring.');
   }
+} else if (action === 'list-domains') {
+  (async ()=>{
+    let domains = await new Zfsdom().getDomains(argv.host,argv.all||false)
+          .catch(err => console.error((err + "").trim()));
+    console.log(argv.plain ? domains.map(i=>Object.keys(i).map(k=>i[k]).join(",")).join("\n") : JSON.stringify(domains,null,2));
+  })();
 } else {
   console.log('Invalid command or missing required arguments.');
 }

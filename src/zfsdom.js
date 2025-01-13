@@ -5,11 +5,11 @@ const bytes = require('bytes');
 const {homedir} = require("os");
 const ProgressBar = require('progress');
 const {statSync} = require("fs");
-function execAsync(command, options = {}) {
+function execAsync(command, options = {},_shell=shell) {
   return new Promise((resolve) => {
     options.async = true;
     options.silent = true;
-    shell.exec(command, options, (code, stdout, stderr) => {
+    _shell.exec(command, options, (code, stdout, stderr) => {
       resolve({code,stdout,stderr});
     });
   });
@@ -55,9 +55,11 @@ class Zfsdom {
    */
   openRemoteSSH(remoteHost,username="root",identity=`/${homedir()}/.ssh/id_rsa`) {
     let [host,port] = remoteHost.split(":");
+    let [,_username,_host] = host.match(/([^@]+)@([^@]+)$/)||[];
+
     return new SSH2Promise({
-      host,
-      username,
+      host:_host||host,
+      username:_username||username,
       port: port || 22,
       identity
     })
@@ -118,44 +120,94 @@ class Zfsdom {
 
   /**
    * Get the latest snapshot on the remote system that exists on the local system as well
-   * @param {SSH2Promise} connection - the connection to use
-   * @param {string} localDataset - the local dataset name/path
-   * @param {string} remoteDataset - the remote dataset name/path
+   * @param {SSH2Promise} destShell - the connection to use for the dest dataset
+   * @param {string} srcHostDataset - the local dataset name/path
+   * @param {string} destDataset - the remote dataset name/path
    */
-  async getLatestCommonSnapshot(connection, localDataset, remoteDataset=localDataset) {
-    let localList = (await this.getSnapshots(shell,localDataset)).map(item=>item.split("@")[1]);
-    let remoteList = (await this.getSnapshots(connection,remoteDataset)).map(item=>item.split("@")[1]);
-    let i = remoteList.length;
-    while (i>=0 && !localList.find(item=>item===remoteList[i]))
+  async getLatestCommonSnapshot(destShell, srcHostDataset, destDataset) {
+    const {host:srcHost, port:srcPort, attr:srcDataset} = this.splitHostPortAttr(srcHostDataset);
+    const srcHostPort = srcHost ? `${srcHost}${srcPort ? `:${srcPort}` : ""}` : null;
+    const srcShell = srcHost ? await this.openRemoteSSH(srcHostPort) : shell;
+    if (!destDataset)
+      destDataset = srcDataset;
+
+    let srcList = (await this.getSnapshots(srcShell,srcDataset)).map(item=>item.split("@")[1]);
+    if (srcHost)
+      await srcShell.close();
+    let destList = (await this.getSnapshots(destShell,destDataset)).map(item=>item.split("@")[1]);
+    let i = destList.length;
+    while (i>=0 && !srcList.find(item=>item===destList[i]))
       i--;
     if (i>=0)
-      return remoteList[i];
+      return destList[i];
     return null;
   }
 
   /**
    * extract the disk path from a libvirt domain xml definition
-   * @param {string} targetDomain - the domain name
+   * @param {string} targetHostDomain - the domain name with optional HOST[:PORT] prefix
    * @returns {Promise<string>}
    */
-  async getDiskPath(targetDomain) {
-    const { stdout } = await execAsync(`virsh dumpxml "${targetDomain}" | grep "source file" | grep -o "'[^']*'" | sed "s/^'//g" | sed "s/'$//g" | head -1`);
+  async getDiskPath(targetHostDomain) {
+    const {host, port, attr:domain} = this.splitHostPortAttr(targetHostDomain);
+    const { stdout } = await execAsync(`${host ? `ssh ${host}${port ? ` -p ${port}` : ""} ` : ""}virsh dumpxml "${domain}" | grep "source file" | grep -o "'[^']*'" | sed "s/^'//g" | sed "s/'$//g" | head -1`);
     return stdout.trim();
   }
 
   /**
+   * extract the disk path from a libvirt domain xml definition
+   * @param {string} targetHostPort - the target host specified as HOST[:PORT]
+   * @returns {Promise<string>}
+   */
+  async getDomains(targetHostPort, showAll=false) {
+    const [host,port] = (targetHostPort||"").split(":");
+    const { stdout } = await execAsync(`${host ? `ssh ${host}${port ? ` -p ${port}` : ""} ` : ""}virsh list ${showAll ? " --all" : ""} | tail -n+3`);
+    return stdout.split(/\n/g).filter(i=>i).map(i=>{
+      let [id,name,state] = i.trim().split(/\s+/g).map(i=>i.trim());
+      return {id,name,state};
+    });
+  }
+
+  /**
+   * split colon-separated arguments containing an attribute with optional HOST[:PORT] prefix
+   * @param hostPortAttr
+   * @returns {{port: string, host: string, attr: string}}
+   */
+  splitHostPortAttr(hostPortAttr) {
+    let host = null;
+    let port = null;
+    let attr = hostPortAttr;
+    let parts = hostPortAttr.split(":");
+    if (parts.length>1) {
+      host = parts.shift();
+      let part = parts.shift();
+      if (isNaN(part))
+        attr = part;
+      else
+        port = part;
+    }
+    if (parts.length)
+      attr = parts.shift();
+    return {
+      host, port, attr
+    }
+  }
+
+  /**
    * Transfer snapshot of a particular zfs dataset to the target system
-   * @param {string} dataset - specify source dataset
+   * @param {string} srcHostDataset - specify source dataset, optionally prefixed by HOST[:PORT]
    * @param {string} destHostPath - specify target as {hostname}:{dataset}
    * @param {boolean} run - only actually do anything if set to true, dry-run otherwise
    * @param {boolean} force - if true, rollback incremental snapshot source on destination if modified or discard existing dataset's contents if no snapshot exists on destination
    * @returns {Promise<boolean>}
    */
-  async transferSnapshot(dataset, destHostPath, run, force) {
+  async transferSnapshot(srcHostDataset, destHostPath, run, force) {
     let bar = new ProgressBar(':bar :percent', {
       total: 100,
       width: 40
     });
+
+    let {host:srcHost, port:srcPort, attr:dataset} = this.splitHostPortAttr(srcHostDataset);
 
     // destHost should include port specification (e.g. :2222) if applicable, so this should not be split off as destDataset
     let destParts = destHostPath.split(":");
@@ -171,39 +223,43 @@ class Zfsdom {
     if (destParts.length)
       destDataset = destParts.shift();
 
-    const ssh = this.openRemoteSSH(destHost);
+    const ssh = await this.openRemoteSSH(destHost);
     let remoteDataset = null;
     let latestCommonSnapshot = null;
     try {
       ({dataset:remoteDataset} = await this.getDatasetByName(ssh,destDataset || dataset));
-      latestCommonSnapshot = await this.getLatestCommonSnapshot(ssh,dataset,destDataset || dataset);
+      latestCommonSnapshot = await this.getLatestCommonSnapshot(ssh,srcHostDataset,destDataset || dataset);
     } catch (err) {
       console.error("\x1b[31m%s\x1b[0m", `${(err+"").trim()}`);
     }
 
     if (remoteDataset)
-      this.printResult(`remote zfs dataset found: ${remoteDataset}`,true)
+      this.printResult(`zfs dataset on ${destHost} found: ${remoteDataset}`,true)
     else {
       let parentDir = (destDataset||dataset).replace(/\/[^/]+$/,"");
       let {dataset:remoteDatasetParent} = await this.getDatasetByName(ssh,parentDir);
       if (remoteDatasetParent)
-        this.printResult(`remote zfs parent dataset found: '${destDataset||dataset}' can be created`,true)
+        this.printResult(`zfs parent dataset on ${destHost} found: '${destDataset||dataset}' can be created`,true)
       else
-        this.printResult(`remote zfs parent dataset not found: '${parentDir}' does not exist`,false)
+        this.printResult(`zfs parent dataset on ${destHost} not found: '${parentDir}' does not exist`,false)
     }
     await ssh.close();
 
     console.log(`latest common snapshot: ${latestCommonSnapshot ? `${latestCommonSnapshot}` : '- none found -'}`);
 
-    await new Promise(resolve=>setTimeout(()=>resolve(),5000));
+    await new Promise(resolve=>setTimeout(()=>resolve(),1000));
 
     if (run) {
-      shell.exec(`zfs snapshot ${dataset}@$(date +%Y%m%d-%H%M%S)`, { silent: true });
-      const localLatest = await this.getLatestSnapshot(shell,dataset);
+      let srcHostPort = `${srcHost}${srcPort ? `:${srcPort}` : ""}`
+      let terminal = srcHost ? await this.openRemoteSSH(srcHostPort) : shell;
+      await terminal.exec(`zfs snapshot ${dataset}@$(date +%Y%m%d-%H%M%S)`, { silent: true });
+      const localLatest = await this.getLatestSnapshot(terminal,dataset);
+      if (srcHost)
+        await terminal.close();
 
       const cmdIncremental = latestCommonSnapshot ? `-i ${dataset}@${latestCommonSnapshot}` : "";
       const cmdForce = (force) ? '-F' : "";
-      const sendCmd = 'zfs';
+      const sendCmd = `zfs`;
       const sendOpts = ['send', '-v', cmdIncremental, localLatest];
       const recvCmd = 'ssh';
       const [destHostName, destPort] = destHost.split(":");
@@ -211,15 +267,18 @@ class Zfsdom {
 
       this.printShellCmd(`${sendCmd} ${sendOpts.join(" ")} | ${recvCmd} ${recvOpts.join(" ")}`);
 
-      const send = spawn(sendCmd, sendOpts ,{shell:true});
-      const recv = spawn(recvCmd, recvOpts,{shell:true});
+      const ssh = srcHost ? await this.openRemoteSSH(srcHostPort) : null;
+
+      const sendRecv = await (ssh ? ssh.spawn : spawn).call(this,`${sendCmd} ${sendOpts.join(" ")} | ${recvCmd} ${recvOpts.join(" ")}`,[],{shell:true})
 
       let totalSize = Infinity;
+      let transferredBytes = 0;
       let hasErrors = false;
       try {
-        send.stdout.pipe(recv.stdin);
+        //send.stdout.pipe(recv.stdin);
         await new Promise((resolve, reject)=>{
-          send.stderr.on('data', (data) => {
+          let errors = [];
+          sendRecv.stderr.on('data', (data) => {
             const totalMatch = `${data}`.match(/total estimated size is (\d+(\.\d+)?[KMGT]?i?B?)/);
             if (totalMatch) {
               let totalSizeHuman = totalMatch[1];
@@ -236,52 +295,40 @@ class Zfsdom {
                 if (transferred) {
                   if (!transferred.match(/B$/i))
                     transferred+="B";
-                  const transferredBytes = bytes.parse(transferred);
-                  if (transferredBytes) {
-                    bar.update(transferredBytes/totalSize);
-                  }
+                  transferredBytes = bytes.parse(transferred);
                 }
+                if (transferredBytes)
+                  bar.update(transferredBytes/totalSize);
+                else
+                  errors.push(line)
               }
             }
           });
-          recv.stderr.on('data', (data) => {
-            console.error("\x1b[31m%s\x1b[0m", `\n${(data+"").trim()}`);
-            hasErrors = true;
-          });
-
-          recv.on('close', (code) => {
-            if (!hasErrors) {
+          sendRecv.on('close', (code) => {
+            if (code === 0) {
               bar.update(1);
-              resolve();
-            }
-            else if (code!==0)
-              reject(`exit code ${code}`)
-          });
 
-          send.on('error', (error) => {
-            console.error(`Error in send process: ${error}`);
+              resolve();
+            } else {
+              reject(errors);
+            }
           });
-          recv.on('error', (error) => {
-            console.error(`Error in recv process: ${error}`);
-          });
-          send.stdout.on('error', (error) => {
-            reject(error);
-            hasErrors = true;
-          });
-          recv.stdin.on('error', (error) => {
-            reject(error);
-            hasErrors = true;
-          });
+          /* listener needs to be attached on stdout, otherwise the process keeps hanging */
+          sendRecv.stdout.on('data', (data) => {});
         });
-      } catch (err) {
-        send.stdout.destroy();
-        console.error("\x1b[31m%s\x1b[0m", `${(err+"").trim()}`);
-        console.log("\x1b[1m\x1b[31m%s\x1b[0m", "✖ transfer failed");
+      } catch (errors) {
+        sendRecv.stdout.destroy();
+        hasErrors = true;
+        console.error("\x1b[31m%s\x1b[0m", `${errors.filter(e=>!e.match(/^TIME\s+SENT\s+SNAPSHOT/)).join("\n")}`);
       }
+      if (ssh)
+        ssh.close();
       if (!hasErrors) {
         console.log("\x1b[1m\x1b[32m%s\x1b[0m", `✔ transfer successful`);
         return true;
       }
+      else
+        console.log("\x1b[1m\x1b[31m%s\x1b[0m", "✖ transfer failed");
     }
     else
       return true;
@@ -290,21 +337,27 @@ class Zfsdom {
 
   /**
    * Transfer snapshot of a particular zfs dataset - specified by the path to a file in it - to the target system
-   * @param {string} path - specify source file path
+   * @param {string} srcHostPath - specify source file path, optionally prefixed by HOST[:PORT]
    * @param {string} destHostPath - specify target as {hostname}:{dataset}
    * @param {boolean} run - only actually do anything if set to true, dry-run otherwise
    * @param {boolean} force - if true, rollback incremental snapshot source on destination if modified or discard existing dataset's contents if no snapshot exists on destination
    * @returns {Promise<boolean>}
    */
-  async transferSnapshotByFilePath(path, destHostPath, run, force) {
-    if (!path) return false;
+  async transferSnapshotByFilePath(srcHostPath, destHostPath, run, force) {
+    if (!srcHostPath) return false;
 
+    const {host:srcHost, port:srcPort, attr:path} = this.splitHostPortAttr(srcHostPath);
+    const srcHostPort = srcHost ? `${srcHost}${srcPort ? `:${srcPort}` : ""}` : null;
+    const terminal = srcHost ? await this.openRemoteSSH(srcHostPort) : shell;
     const mountPoint = path.replace(/\/[^\/]*$/g,"");
-    const {dataset} = await this.getDatasetByMountPoint(shell,mountPoint)
+    const {dataset} = await this.getDatasetByMountPoint(terminal,mountPoint);
+    if (srcHost)
+      await terminal.close();
 
     if (dataset) {
-      this.printResult(`local zfs dataset found: ${dataset}`,true)
-      return this.transferSnapshot(dataset, destHostPath, run, force)
+      const srcHostDataset = `${srcHostPort ? `${srcHostPort}:` : ""}${dataset}`;
+      this.printResult(`${!srcHostPort ? "local " : ""}zfs dataset ${srcHostPort ? `on ${srcHostPort} ` : ""}found: ${dataset}`,true)
+      return this.transferSnapshot(srcHostDataset, destHostPath, run, force)
     } else {
       this.printResult(`no zfs dataset found for '${path}'`,false)
     }
@@ -313,34 +366,46 @@ class Zfsdom {
 
   /**
    * Transfer snapshot of a particular zfs dataset to the target system
-   * @param {string} dataset - specify source file path
+   * @param {string} srcHostDatasetName - specify source file path
    * @param {string} destHostPath - specify target as {hostname}:{dataset}
    * @param {boolean} run - only actually do anything if set to true, dry-run otherwise
    * @param {boolean} force - if true, rollback incremental snapshot source on destination if modified or discard existing dataset's contents if no snapshot exists on destination
    * @returns {Promise<boolean>}
    */
-  async transferSnapshotByDataset(datasetName, destHostPath, run, force) {
-    const {dataset} = await this.getDatasetByName(shell,datasetName)
+  async transferSnapshotByDataset(srcHostDatasetName, destHostPath, run, force) {
+    const {host:srcHost, port:srcPort, attr:datasetName} = this.splitHostPortAttr(srcHostDatasetName);
+    const srcHostPort = srcHost ? `${srcHost}${srcPort ? `:${srcPort}` : ""}` : null;
+    const terminal = srcHost ? await this.openRemoteSSH(srcHostPort) : shell;
+    const {dataset} = await this.getDatasetByName(terminal,datasetName);
+    if (srcHost)
+      terminal.close();
 
     if (dataset) {
-      this.printResult(`local zfs dataset found: ${dataset}`,true)
-      return this.transferSnapshot(dataset, destHostPath, run, force)
+      this.printResult(`${!srcHostPort ? "local " : ""}zfs dataset ${srcHostPort ? `on ${srcHostPort} ` : ""}found: ${dataset}`,true)
+      return this.transferSnapshot(`${srcHostPort ? `${srcHostPort}:` : ""}${dataset}`, destHostPath, run, force)
     } else {
-      this.printResult(`no zfs dataset found for '${path}'`,false)
+      this.printResult(`no zfs dataset found for '${srcHostDatasetName}'`,false)
     }
     return false;
   }
 
   /**
    * Transfer snapshot of a particular zfs dataset (specified by the libvirt domain that has its disks stored on it) to the target system
-   * @param {string} domain - specify domain name
+   * @param {string} srcHostDomain - specify domain name
    * @param {string} destHostPath - specify target as {hostname}:{dataset}
    * @param {boolean} run - only actually do anything if set to true, dry-run otherwise
    * @param {boolean} force - if true, rollback incremental snapshot source on destination if modified or discard existing dataset's contents if no snapshot exists on destination
    * @returns {Promise<boolean>}
    */
-  async transferDomainSnapshot(domain, destHostPath, run, force) {
-    return await this.transferSnapshotByFilePath(await this.getDiskPath(domain), destHostPath, run, force);
+  async transferDomainSnapshot(srcHostDomain, destHostPath, run, force) {
+    const {host:srcHost, port:srcPort, attr:domain} = this.splitHostPortAttr(srcHostDomain);
+    const srcHostPort = srcHost ? `${srcHost}${srcPort ? `:${srcPort}` : ""}` : null;
+    let path = await this.getDiskPath(srcHostDomain);
+    if (!path) {
+      this.printResult(`no disk path found for '${srcHostDomain}' (does the domain ${domain} exist on ${srcHostPort}?)`,false)
+      return false;
+    }
+    return await this.transferSnapshotByFilePath(`${srcHostPort ? `${srcHostPort}:` : ""}${path}`, destHostPath, run, force);
   }
 
   /**
@@ -351,7 +416,7 @@ class Zfsdom {
    * @param {boolean} force - if true, rollback incremental snapshot source on destination if modified or discard existing dataset's contents if no snapshot exists on destination
    * @returns {Promise<boolean>}
    */
-  async migrateDomain(domain, destHostPath, run, force) {
+  async migrateDomain(srcHostDomain, destHostPath, run, force) {
     let destParts = destHostPath.split(":");
     let destHost = destParts.shift();
     let destPath = null;
@@ -365,7 +430,10 @@ class Zfsdom {
     if (destParts.length)
       destPath = destParts.shift();
 
-    let { stdout:isRunning } = await execAsync(`virsh list --name | grep -x "\\b${domain}\\b"`);
+    const {host:srcHost, port:srcPort, attr:domain} = this.splitHostPortAttr(srcHostDomain);
+    const srcHostPort = srcHost ? `${srcHost}${srcPort ? `:${srcPort}` : ""}` : null;
+
+    let { stdout:isRunning } = await execAsync(`${srcHost ? `ssh ${srcHost}${srcPort ? ` -p ${srcPort}` : ""} ` : ""}virsh list --name | grep -x "\\b${domain}\\b"`);
     isRunning = isRunning.trim();
 
     if (!isRunning) {
@@ -373,15 +441,18 @@ class Zfsdom {
       return false;
     }
 
-    const path = await this.getDiskPath(domain);
-    const transferSuccess = await this.transferSnapshotByFilePath(path, destHostPath, run, force);
+    const path = await this.getDiskPath(srcHostDomain);
+    const transferSuccess = await this.transferSnapshotByFilePath(`${srcHostPort ? `${srcHostPort}:` : ""}${path}`, destHostPath, run, force);
 
-    const {uid,gid} = statSync(path);
-    const fileUser = shell.exec(`id -nu ${uid}`,{silent:true}).stdout.trim();
-    const fileGroup = shell.exec(`id -ng ${gid}`,{silent:true}).stdout.trim();
+    const terminal = srcHost ? await this.openRemoteSSH(srcHostPort) : shell;
+    const [uid,gid] = (await terminal.exec(`stat -c '%u %g' ${path}`)).split(/\s+/);
+    const fileUser = (await terminal.exec(`id -nu ${uid}`,{silent:true})).trim();
+    const fileGroup = (await terminal.exec(`id -ng ${gid}`,{silent:true})).trim();
 
     if (!transferSuccess) {
       console.error("\x1b[1m\x1b[31m%s\x1b[0m", `snapshot transfer failed, aborting`);
+      if (srcHost)
+        terminal.close();
       return false;
     }
 
@@ -389,14 +460,13 @@ class Zfsdom {
       let customXml;
       if (destPath) {
         customXml = `/tmp/snpshmgr-${domain}.xml`;
-        await execAsync(`virsh dumpxml ${domain} > ${customXml}`);
+        await terminal.exec(`virsh dumpxml ${domain} > ${customXml}`);
         const srcPath = path.replace(/\/[^\/]*$/, '');
-        await execAsync(`sed -i "s?${srcPath}?/${destPath}?g" ${customXml}`);
+        await terminal.exec(`sed -i "s?${srcPath}?/${destPath}?g" ${customXml}`);
       }
-
-      await execAsync(`virsh autostart ${domain} --disable`);
+      await terminal.exec(`virsh autostart ${domain} --disable`);
       try {
-        await new Promise((resolve, reject) => {
+        await new Promise(async (resolve, reject) => {
           const args = [
             'migrate',
             '--live',
@@ -415,7 +485,7 @@ class Zfsdom {
             domain,
             `qemu+ssh://${destHost}/system`
           ];
-          const virsh = spawn('virsh', args,{shell:true});
+          const virsh = await (srcHost ? terminal.spawn : spawn).call(this,'virsh', args, {shell:true});
           virsh.stdout.on('data', (data) => {
             process.stdout.write(data);
           });
@@ -437,7 +507,7 @@ class Zfsdom {
         console.error('An error occurred:', error);
       }
 
-      await this.transferSnapshotByFilePath(path, destHostPath, run, true);
+      await this.transferSnapshotByFilePath(`${srcHostPort ? `${srcHostPort}:` : ""}${path}`, destHostPath, run, true);
 
       const ssh = await this.openRemoteSSH(destHost);
       try {
@@ -448,10 +518,13 @@ class Zfsdom {
         await ssh.close();
       }
 
-      let {code:resumeDomainResult} = await execAsync(`virsh -c qemu+ssh://${destHost}/system resume ${domain}`);
-      await execAsync(`virsh -c qemu+ssh://${destHost}/system autostart ${domain}`);
+      let {code:resumeDomainResult} = await execAsync(`${srcHost ? `ssh ${srcHost}${srcPort ? ` -p ${srcPort}` : ""} ` : ""}virsh -c qemu+ssh://${destHost}/system resume ${domain}`);
+      await execAsync(`${srcHost ? `ssh ${srcHost}${srcPort ? ` -p ${srcPort}` : ""} ` : ""}virsh -c qemu+ssh://${destHost}/system autostart ${domain}`);
       this.printActionResult("domain migration",resumeDomainResult===0)
+
     }
+    if (srcHost)
+      terminal.close();
   }
 }
 
