@@ -209,19 +209,23 @@ class Zfsdom {
 
     let {host:srcHost, port:srcPort, attr:dataset} = this.splitHostPortAttr(srcHostDataset);
 
-    // destHost should include port specification (e.g. :2222) if applicable, so this should not be split off as destDataset
-    let destParts = destHostPath.split(":");
-    let destHost = destParts.shift();
-    let destDataset = null;
-    if (destParts.length) {
-      let part = destParts.shift();
-      if (isNaN(part))
-        destDataset = part;
-      else
-        destHost = `${destHost}:${part}`
-    }
-    if (destParts.length)
-      destDataset = destParts.shift();
+      let destParts = destHostPath.split(":");
+      let destHost = destParts.shift();
+      let destHostInternal = null
+      let destDataset = null;
+      if (destParts.length) {
+          let part = destParts.shift();
+          let regexInternalHostname = /\[([^)]+)\]$/;
+          ([,destHostInternal] = part.match(regexInternalHostname)||[]);
+          if (destHostInternal)
+              part = part.replace(regexInternalHostname,"");
+          if (isNaN(part))
+              destDataset = part;
+          else
+              destHost = `${destHost}:${part}`
+      }
+      if (destParts.length)
+          destDataset = destParts.shift();
 
     const ssh = await this.openRemoteSSH(destHost);
     let remoteDataset = null;
@@ -262,7 +266,7 @@ class Zfsdom {
       const sendCmd = `zfs`;
       const sendOpts = ['send', '-v', cmdIncremental, localLatest];
       const recvCmd = 'ssh';
-      const [destHostName, destPort] = destHost.split(":");
+      const [destHostName, destPort] = (destHostInternal||destHost).split(":");
       const recvOpts = [...destPort ? ['-p', destPort] : [], destHostName, 'zfs', 'recv', destDataset || dataset, cmdForce];
 
       this.printShellCmd(`${sendCmd} ${sendOpts.join(" ")} | ${recvCmd} ${recvOpts.join(" ")}`);
@@ -392,7 +396,7 @@ class Zfsdom {
   /**
    * Transfer snapshot of a particular zfs dataset (specified by the libvirt domain that has its disks stored on it) to the target system
    * @param {string} srcHostDomain - specify domain name
-   * @param {string} destHostPath - specify target as {hostname}:{dataset}
+   * @param {string} destHostPath - specify target as {hostname}:{port}({internal_hostname}):{dataset}
    * @param {boolean} run - only actually do anything if set to true, dry-run otherwise
    * @param {boolean} force - if true, rollback incremental snapshot source on destination if modified or discard existing dataset's contents if no snapshot exists on destination
    * @returns {Promise<boolean>}
@@ -411,7 +415,7 @@ class Zfsdom {
   /**
    * Migrate libvirt domain to target hypervisor by incrementally transferring zfs snapshots and doing live (suspended) migration in-between
    * @param {string} domain - specify domain name
-   * @param {string} destHostPath - specify target as {hostname}:{dataset}
+   * @param {string} destHostPath - specify target as {hostname}:{port}({internal_hostname}):{dataset}
    * @param {boolean} run - only actually do anything if set to true, dry-run otherwise
    * @param {boolean} force - if true, rollback incremental snapshot source on destination if modified or discard existing dataset's contents if no snapshot exists on destination
    * @returns {Promise<boolean>}
@@ -419,9 +423,14 @@ class Zfsdom {
   async migrateDomain(srcHostDomain, destHostPath, run, force) {
     let destParts = destHostPath.split(":");
     let destHost = destParts.shift();
+    let destHostInternal = null
     let destPath = null;
     if (destParts.length) {
       let part = destParts.shift();
+      let regexInternalHostname = /\[([^)]+)\]$/;
+      ([,destHostInternal] = part.match(regexInternalHostname)||[]);
+      if (destHostInternal)
+        part = part.replace(regexInternalHostname,"");
       if (isNaN(part))
         destPath = part;
       else
@@ -429,6 +438,8 @@ class Zfsdom {
     }
     if (destParts.length)
       destPath = destParts.shift();
+
+    const destHostPathInternal = destHostInternal ? `${destHostInternal||destHost}${destPath ? `:${destPath}` : ""}` : null;
 
     const {host:srcHost, port:srcPort, attr:domain} = this.splitHostPortAttr(srcHostDomain);
     const srcHostPort = srcHost ? `${srcHost}${srcPort ? `:${srcPort}` : ""}` : null;
@@ -483,7 +494,7 @@ class Zfsdom {
                 ] : []
             ),
             domain,
-            `qemu+ssh://${destHost}/system`
+            `qemu+ssh://${destHostInternal||destHost}/system`
           ];
           const virsh = await (srcHost ? terminal.spawn : spawn).call(this,'virsh', args, {shell:true});
           virsh.stdout.on('data', (data) => {
@@ -518,8 +529,8 @@ class Zfsdom {
         await ssh.close();
       }
 
-      let {code:resumeDomainResult} = await execAsync(`${srcHost ? `ssh ${srcHost}${srcPort ? ` -p ${srcPort}` : ""} ` : ""}virsh -c qemu+ssh://${destHost}/system resume ${domain}`);
-      await execAsync(`${srcHost ? `ssh ${srcHost}${srcPort ? ` -p ${srcPort}` : ""} ` : ""}virsh -c qemu+ssh://${destHost}/system autostart ${domain}`);
+      let {code:resumeDomainResult} = await execAsync(`${srcHost ? `ssh ${srcHost}${srcPort ? ` -p ${srcPort}` : ""} ` : ""}virsh -c qemu+ssh://${destHostInternal||destHost}/system resume ${domain}`);
+      await execAsync(`${srcHost ? `ssh ${srcHost}${srcPort ? ` -p ${srcPort}` : ""} ` : ""}virsh -c qemu+ssh://${destHostInternal||destHost}/system autostart ${domain}`);
       this.printActionResult("domain migration",resumeDomainResult===0)
 
     }
