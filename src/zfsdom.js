@@ -537,6 +537,43 @@ class Zfsdom {
     if (srcHost)
       terminal.close();
   }
+  /**
+   * Execute virsh operation upon libvirt domain
+   * @param {string} srcHostDomain - specify domain name
+   * @param {string} cmd - command to execute
+   * @returns {Promise<boolean>}
+   */
+  async executeDomainOperation(srcHostDomain, cmd) {
+    const {host, port, attr:domain} = this.splitHostPortAttr(srcHostDomain);
+    const hostPort = host ? `${host}${port ? `:${port}` : ""}` : null;
+    const terminal = host ? await this.openRemoteSSH(hostPort) : shell;
+    try {
+      await new Promise(async (resolve, reject) => {
+        const virsh = await (host ? terminal.spawn : spawn).call(this,'virsh', [cmd,`"${domain}"`], {shell:true});
+        virsh.stdout.on('data', (data) => {
+          process.stdout.write(data);
+        });
+        virsh.stderr.on('data', (data) => {
+          process.stderr.write(data);
+        });
+        virsh.on('error', (error) => {
+          reject(error);
+        });
+        virsh.on('exit', (code) => {
+          if (code === 0) {
+            resolve();
+          } else {
+            reject(new Error());
+          }
+        });
+      });
+      this.printResult("domain operation completed successfully",true)
+    } catch (error) {
+      this.printResult("domain operation failed",false)
+    }
+    if (host)
+      terminal.close();
+  }
 }
 
 module.exports = Zfsdom;

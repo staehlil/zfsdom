@@ -87,6 +87,28 @@ const argv = yargs(hideBin(process.argv))
               })
         }
     )
+    .command(
+        'virsh [cmd]',
+        'execute virsh operation upon domain',
+        (yargs) => {
+            return yargs
+                .option('domain', {
+                    description: 'Specify libvirt domain to execute operation upon',
+                    type: 'string',
+                })
+                .positional('cmd', {
+                    description: 'virsh operation / command to execute',
+                    type: 'string',
+                    demandOption: true,
+                })
+                .check((argv) => {
+                    if (!argv.domain) {
+                        throw new Error('--domain should be provided.');
+                    }
+                    return true;
+                })
+        }
+    )
     .option('do', {
       description: 'only actually do anything if set to true, dry-run otherwise',
       type: 'boolean',
@@ -116,6 +138,9 @@ if (action === 'migrate' && argv['dest']) {
   } else {
     console.log('Please provide either --dataset or --domain argument for transferring.');
   }
+} else if (action === 'virsh' && argv.cmd) {
+    new Zfsdom().executeDomainOperation(argv.domain,argv.cmd)
+        .catch(err => console.error((err + "").trim()));
 } else if (action === 'list-domains') {
   (async ()=>{
     let domains = await new Zfsdom().getDomains(argv.host,argv.all||false)
