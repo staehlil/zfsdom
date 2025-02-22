@@ -29,18 +29,18 @@ As of now, `zfsdom` is optimized for virtual machines with the following setup:
 
 ### Installation from Binary
 
-1. Download the appropriate Linux x64 binary named `zfsdom` from the Releases page.
+1. Download the appropriate Linux x64 binary named `zfsdom-x64` from the Releases page.
 
 2. Give execute permissions to the downloaded binary:
 
     ```bash
-    chmod +x zfsdom
+    chmod +x zfsdom-x64
     ```
 
 3. Move the binary to a directory in your PATH, e.g., `/usr/bin`:
 
     ```bash
-    sudo mv zfsdom /usr/bin/
+    sudo mv zfsdom-x64 /usr/bin/zfsdom
     ```
 
 ### Installation from Source
@@ -79,43 +79,78 @@ As of now, `zfsdom` is optimized for virtual machines with the following setup:
 
 #### Transfer Command
 
-- Transfer the storage of the local libvirt domain named 'foo' on a ZFS dataset to a dataset sharing the same name on the remote host 'host1':
+The `transfer` command incrementally copies a zfs dataset to a remote host. Use the `--domain` argument to copy the dataset where the storage
+of a libvirt is located. If you'd like to specify the dataset directly, use the `--dataset` argument instead.
+If the source domain/storage resides on a **remote** system, specify the hostname in the `--domain` (or `--dataset`) argument to initiate the transfer from there.
+If the source host uses a non-standard port for ssh, include the port in the hostname specification. You can also specify a target path for 
+the storage to use on the destination host (otherwise dataset name will be derived from the source host). Datasets on the destination host
+will be created as long as the parent dataset exists. If you want to use an internal network for the transfer, append the internal hostname/adress to the destination hostname (using brackets).
 
-    ```bash
-    zfsdom transfer --domain foo host1
-    ```
+ⓘ **Note**: You need to specify `--do` to actually transfer data. Without it, zfsdom will only perform a dry run.
 
-- Transfer the storage of the local libvirt domain named 'foo' on a ZFS dataset to the dataset 'bar/baz' on the remote host 'host1':
+```bash
+# transfer domain storage from the local system to host1 
+zfsdom transfer --domain foo host1
 
-    ```bash
-    zfsdom transfer --domain foo host1:bar/baz
-    ```
+# Transfer storage of domain 'foo' residing on barhost.baz (ssh accessible on port 22) to host1
+zfsdom transfer --domain barhost.baz:foo host1
 
-- Transfer the ZFS dataset named 'foo/bar' to a dataset sharing the same name on the remote host 'host1':
+# Same as above, but using port 2233 to access the source host
+zfsdom transfer --domain barhost.baz:2233:foo host1
 
-    ```bash
-    zfsdom transfer --dataset foo/bar host1
-    ```
+# Transfer storage of domain 'foo' to host1 to the dataset /bar/baz
+zfsdom transfer --domain bazhost.bar:foo host1:/bar/baz
 
-- Transfer the ZFS dataset named 'foo/bar' to a dataset named 'bar/baz' on the remote host 'host1':
+# Like the above example, but use an internal network for the transfer 
+zfsdom transfer --domain bazhost.bar:foo host1(192.168.77.101):/bar/baz
 
-    ```bash
-    zfsdom transfer --dataset foo/bar host1:bar/baz
-    ```
+# Transfer storage by specifying the dataset directly
+zfsdom transfer --dataset foo/bar host1:bar/baz
+
+# Actually perform the transfer instead of just a dry run
+zfsdom transfer --domain foo host1 --do
+```
 
 #### Migrate Command
 
-- Live migrate the libvirt domain named 'foo' with its storage residing on a local ZFS dataset to the remote host 'host1':
+The `migrate` command incrementally copies the source domain's storage to the target host and performs a synchronized live migration.
+If the source domain/storage resides on a **remote** system, specify the hostname in the `--domain` argument to initiate the transfer from there.
+If the source host uses a non-standard port for ssh, include the port in the hostname specification. You can also specify a target path for
+the storage to use on the destination host (otherwise dataset name will be derived from the source host). Datasets on the destination host
+will be created as long as the parent dataset exists and the domain definition on the destination host will be updated accordingly.
 
-    ```bash
-    zfsdom migrate --domain foo host1
-    ```
+ⓘ **Note**: You need to specify `--do` to actually migrate. Without it, zfsdom will only perform a dry run.
 
-- Live migrate the libvirt domain named 'foo' with its storage residing on a local ZFS dataset to the remote host 'host1', transferring storage to the ZFS dataset 'bar/baz':
+```bash
+# migrate the domain 'foo' from the local system to host1 
+zfsdom migrate --domain foo host1
 
-    ```bash
-    zfsdom migrate --domain foo host1:bar/baz
-    ```
+# migrate the domain 'foo' residing on barhost.baz (ssh accessible on port 22) to host1
+zfsdom migrate --domain barhost.baz:foo host1
+
+# Same as above, but using port 2233 to access the source host
+zfsdom migrate --domain barhost.baz:2233:foo host1
+
+# migrate the domain 'foo' to host1 using a different storage dataset name/path on the destination host 
+zfsdom migrate --domain bazhost.bar:foo host1:/bar/baz
+
+# Like the above example, but use an internal network for the migration 
+zfsdom migrate --domain bazhost.bar:foo host1(192.168.77.101):/bar/baz
+
+# Actually perform the migration instead of just a dry run
+zfsdom migrate --domain foo host1 --do
+```
+
+#### Virsh Command
+The `virsh` command allows you to execute virsh commands on the target host, e.g. start, shutdown, destroy etc.
+
+```bash
+# start domain foo on local system
+zfsdom virsh start --domain foo
+
+# dump domain definition of domain foo on remote system foohost.bar
+zfsdom virsh dumpxml --domain foohost.bar:baz
+```
 
 ## Migrating Existing VMs to ZFS
 
