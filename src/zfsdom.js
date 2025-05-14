@@ -209,23 +209,24 @@ class Zfsdom {
 
     let {host:srcHost, port:srcPort, attr:dataset} = this.splitHostPortAttr(srcHostDataset);
 
-      let destParts = destHostPath.split(":");
-      let destHost = destParts.shift();
-      let destHostInternal = null
-      let destDataset = null;
-      if (destParts.length) {
-          let part = destParts.shift();
-          let regexInternalHostname = /\[([^)]+)\]$/;
-          ([,destHostInternal] = part.match(regexInternalHostname)||[]);
-          if (destHostInternal)
-              part = part.replace(regexInternalHostname,"");
-          if (isNaN(part))
-              destDataset = part;
-          else
-              destHost = `${destHost}:${part}`
-      }
-      if (destParts.length)
-          destDataset = destParts.shift();
+    // @todo fix: if there is no port, below logic breaks
+    let destParts = destHostPath.split(":");
+    let destHost = destParts.shift();
+    let destHostInternal = null
+    let destDataset = null;
+    if (destParts.length) {
+        let part = destParts.shift();
+        let regexInternalHostname = /\[([^)]+)\]$/;
+        ([,destHostInternal] = part.match(regexInternalHostname)||[]);
+        if (destHostInternal)
+            part = part.replace(regexInternalHostname,"");
+        if (isNaN(part))
+            destDataset = part;
+        else
+            destHost = `${destHost}:${part}`
+    }
+    if (destParts.length)
+        destDataset = destParts.shift();
 
     const ssh = await this.openRemoteSSH(destHost);
     let remoteDataset = null;
