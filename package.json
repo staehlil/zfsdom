@@ -5,7 +5,8 @@
   "main": "index.js",
   "bin": "index.js",
   "scripts": {
-    "build": "mkdir -p build && pkg . --output build/zfsdom"
+    "build": "mkdir -p build && pkg --targets node18-linux-x64 . --output build/zfsdom-x64",
+    "build-all": "mkdir -p build && pkg . --output build/zfsdom"
   },
   "pkg": {
     "targets": [

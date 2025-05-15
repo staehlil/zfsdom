@@ -209,14 +209,16 @@ class Zfsdom {
 
     let {host:srcHost, port:srcPort, attr:dataset} = this.splitHostPortAttr(srcHostDataset);
 
-    // @todo fix: if there is no port, below logic breaks
     let destParts = destHostPath.split(":");
     let destHost = destParts.shift();
     let destHostInternal = null
     let destDataset = null;
+    let regexInternalHostname = /\[([^)]+)\]$/;
+
+    // if either port or destDataset (or both) were specified
     if (destParts.length) {
         let part = destParts.shift();
-        let regexInternalHostname = /\[([^)]+)\]$/;
+
         ([,destHostInternal] = part.match(regexInternalHostname)||[]);
         if (destHostInternal)
             part = part.replace(regexInternalHostname,"");
@@ -225,8 +227,15 @@ class Zfsdom {
         else
             destHost = `${destHost}:${part}`
     }
+
+    // if port AND destDataset were specified
     if (destParts.length)
         destDataset = destParts.shift();
+
+    // if no port was specified
+    ([,destHostInternal] = destHost.match(regexInternalHostname)||[]);
+    if (destHostInternal)
+      destHost = destHost.replace(regexInternalHostname,"");
 
     const ssh = await this.openRemoteSSH(destHost);
     let remoteDataset = null;
@@ -426,9 +435,12 @@ class Zfsdom {
     let destHost = destParts.shift();
     let destHostInternal = null
     let destPath = null;
+    let regexInternalHostname = /\[([^)]+)\]$/;
+
+    // if either port or destPath (or both) were specified
     if (destParts.length) {
       let part = destParts.shift();
-      let regexInternalHostname = /\[([^)]+)\]$/;
+
       ([,destHostInternal] = part.match(regexInternalHostname)||[]);
       if (destHostInternal)
         part = part.replace(regexInternalHostname,"");
@@ -437,8 +449,15 @@ class Zfsdom {
       else
         destHost = `${destHost}:${part}`
     }
+
+    // if port AND destPath were specified
     if (destParts.length)
       destPath = destParts.shift();
+
+    // if no port was specified
+    ([,destHostInternal] = destHost.match(regexInternalHostname)||[]);
+    if (destHostInternal)
+      destHost = destHost.replace(regexInternalHostname,"");
 
     const destHostPathInternal = destHostInternal ? `${destHostInternal||destHost}${destPath ? `:${destPath}` : ""}` : null;
 
