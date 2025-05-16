@@ -51,6 +51,10 @@ const argv = yargs(hideBin(process.argv))
                 type: 'string',
                 demandOption: true,
               })
+              .option('map', {
+                  description: 'Specify device name mapping, e.g. \'dev:enp1s0:eno1,dev:enp1s1:eno2\'',
+                  type: 'string',
+              })
               .check((argv) => {
                 if (!argv.domain) {
                   throw new Error('--domain should be provided.');
@@ -126,7 +130,7 @@ const argv = yargs(hideBin(process.argv))
 const action = argv._[0];
 
 if (action === 'migrate' && argv['dest']) {
-  new Zfsdom().migrateDomain(argv.domain, argv['dest'], argv.do, argv.force)
+  new Zfsdom().migrateDomain(argv.domain, argv['dest'], argv.map||'', argv.do, argv.force)
       .catch(err => console.error((err + "").trim()));
 } else if (action === 'transfer' && argv['dest']) {
   if (argv.domain) {

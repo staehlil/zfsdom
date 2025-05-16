@@ -426,11 +426,12 @@ class Zfsdom {
    * Migrate libvirt domain to target hypervisor by incrementally transferring zfs snapshots and doing live (suspended) migration in-between
    * @param {string} domain - specify domain name
    * @param {string} destHostPath - specify target as {hostname}:{port}({internal_hostname}):{dataset}
+   * @param {string} map - specify device name mapping as [{label}:{name_old}:{name_new},]
    * @param {boolean} run - only actually do anything if set to true, dry-run otherwise
    * @param {boolean} force - if true, rollback incremental snapshot source on destination if modified or discard existing dataset's contents if no snapshot exists on destination
    * @returns {Promise<boolean>}
    */
-  async migrateDomain(srcHostDomain, destHostPath, run, force) {
+  async migrateDomain(srcHostDomain, destHostPath, map='', run, force) {
     let destParts = destHostPath.split(":");
     let destHost = destParts.shift();
     let destHostInternal = null
@@ -478,7 +479,6 @@ class Zfsdom {
     const terminal = srcHost ? await this.openRemoteSSH(srcHostPort) : shell;
     const [uid,gid] = (await terminal.exec(`stat -c '%u %g' ${path}`)).split(/\s+/);
     const fileUser = (await terminal.exec(`id -nu ${uid}`,{silent:true})).trim();
-    const fileGroup = (await terminal.exec(`id -ng ${gid}`,{silent:true})).trim();
 
     if (!transferSuccess) {
       console.error("\x1b[1m\x1b[31m%s\x1b[0m", `snapshot transfer failed, aborting`);
@@ -489,11 +489,21 @@ class Zfsdom {
 
     if (run) {
       let customXml;
-      if (destPath) {
+      if (destPath || map) {
         customXml = `/tmp/snpshmgr-${domain}.xml`;
         await terminal.exec(`virsh dumpxml ${domain} > ${customXml}`);
-        const srcPath = path.replace(/\/[^\/]*$/, '');
-        await terminal.exec(`sed -i "s?${srcPath}?/${destPath}?g" ${customXml}`);
+
+        if (destPath) {
+          const srcPath = path.replace(/\/[^\/]*$/, '');
+          await terminal.exec(`sed -i "s?${srcPath}?/${destPath}?g" ${customXml}`);
+        }
+
+        // apply device mapping (if any) to custom xml
+        let items = map ? map.split(",") : [];
+        for (let item of items) {
+          let [label,from,to] = item.split(":");
+          await terminal.exec(`sed -i "s/${label}='${from}'/${label}='${to}'/g" ${customXml}`);
+        }
       }
       await terminal.exec(`virsh autostart ${domain} --disable`);
       try {
@@ -506,7 +516,7 @@ class Zfsdom {
             '--verbose',
             '--unsafe',
             ...(
-                destPath ? [
+                customXml ? [
                   '--persistent-xml',
                   customXml,
                   '--xml',
