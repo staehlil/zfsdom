@@ -233,7 +233,8 @@ class Zfsdom {
         destDataset = destParts.shift();
 
     // if no port was specified
-    ([,destHostInternal] = destHost.match(regexInternalHostname)||[]);
+    if (!destHostInternal)
+      ([,destHostInternal] = destHost.match(regexInternalHostname)||[]);
     if (destHostInternal)
       destHost = destHost.replace(regexInternalHostname,"");
 
@@ -456,7 +457,8 @@ class Zfsdom {
       destPath = destParts.shift();
 
     // if no port was specified
-    ([,destHostInternal] = destHost.match(regexInternalHostname)||[]);
+    if (!destHostInternal)
+      ([,destHostInternal] = destHost.match(regexInternalHostname)||[]);
     if (destHostInternal)
       destHost = destHost.replace(regexInternalHostname,"");
 
