@@ -424,6 +424,29 @@ class Zfsdom {
   }
 
   /**
+   * Modify domain xml by substituting values
+   * @param {string} terminal - the active terminal
+   * @param {string} xmlPath - path to the xml dumpfile
+   * @param {string} srcPath - path to storage on src
+   * @param {boolean} destPath - path to storage on dest (if it differs from src, may be null otherwise)
+   * @param {boolean} map - specify device name mapping as [{label}:{name_old}:{name_new},]
+   * @returns {Promise<boolean>}
+   */
+  async modifyDomainXML(terminal, xmlPath, srcPath, destPath=null, map="") {
+    if (destPath) {
+      const srcPath = srcPath.replace(/\/[^\/]*$/, '');
+      await terminal.exec(`sed -i "s?${srcPath}?/${destPath}?g" ${xmlPath}`);
+    }
+
+    // apply device mapping (if any) to custom xml
+    let items = map ? map.split(",") : [];
+    for (let item of items) {
+      let [label,from,to] = item.split(":");
+      await terminal.exec(`sed -i "s/${label}='${from}'/${label}='${to}'/g" ${xmlPath}`);
+    }
+  }
+
+  /**
    * Migrate libvirt domain to target hypervisor by incrementally transferring zfs snapshots and doing live (suspended) migration in-between
    * @param {string} domain - specify domain name
    * @param {string} destHostPath - specify target as {hostname}:{port}({internal_hostname}):{dataset}
@@ -495,17 +518,7 @@ class Zfsdom {
         customXml = `/tmp/snpshmgr-${domain}.xml`;
         await terminal.exec(`virsh dumpxml ${domain} > ${customXml}`);
 
-        if (destPath) {
-          const srcPath = path.replace(/\/[^\/]*$/, '');
-          await terminal.exec(`sed -i "s?${srcPath}?/${destPath}?g" ${customXml}`);
-        }
-
-        // apply device mapping (if any) to custom xml
-        let items = map ? map.split(",") : [];
-        for (let item of items) {
-          let [label,from,to] = item.split(":");
-          await terminal.exec(`sed -i "s/${label}='${from}'/${label}='${to}'/g" ${customXml}`);
-        }
+        this.modifyDomainXML(terminal,path,destPath,map,customXml);
       }
       await terminal.exec(`virsh autostart ${domain} --disable`);
       try {
@@ -572,7 +585,7 @@ class Zfsdom {
   /**
    * Execute virsh operation upon libvirt domain
    * @param {string} srcHostDomain - specify domain name
-   * @param {string} cmd - command to execute
+   * @param {string} cmd - command to execute. May contain {DOMAIN} for substitution - if it doesn't, domain argument is appended at the end of the virsh command.
    * @returns {Promise<boolean>}
    */
   async executeDomainOperation(srcHostDomain, cmd) {
@@ -581,7 +594,7 @@ class Zfsdom {
     const terminal = host ? await this.openRemoteSSH(hostPort) : shell;
     try {
       await new Promise(async (resolve, reject) => {
-        const virsh = await (host ? terminal.spawn : spawn).call(this,'virsh', [cmd,`"${domain}"`], {shell:true});
+        const virsh = await (host ? terminal.spawn : spawn).call(this,'virsh', cmd.match(/\{DOMAIN\}/) ? [cmd.replace(/\{DOMAIN\}/,domain)] : [cmd,`"${domain}"`], {shell:true});
         virsh.stdout.on('data', (data) => {
           process.stdout.write(data);
         });
